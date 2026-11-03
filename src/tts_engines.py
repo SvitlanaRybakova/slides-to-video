@@ -9,6 +9,8 @@ from __future__ import annotations
 import abc
 from pathlib import Path
 
+import json
+import subprocess
 import numpy as np
 import soundfile as sf
 
@@ -44,6 +46,73 @@ LANGUAGE_MAP_QWEN3 = {
     "fr": "French", "de": "German", "es": "Spanish", "ar": "Arabic",
     "ru": "Russian", "pt": "Portuguese",
 }
+
+
+class PiperTTSEngine(TTSEngine):
+    """Piper TTS: local speech synthesis with pre-trained ONNX models.
+
+    Uses the piper command-line tool with ONNX models.
+    Supports multilingual models including piper-swedish-tts-multispeaker.
+
+    Requires: piper binary installed and model files available.
+    Model can be downloaded from: https://huggingface.co/SubZeroAI/piper-swedish-tts-multispeaker
+
+    Example:
+        >>> engine = PiperTTSEngine()
+        >>> engine.load("cpu")
+        >>> wav, sr = engine.generate("Hej på dig", voice_wav_path)
+    """
+
+    def __init__(self, model_path: str = None, speaker_id: int = 0):
+        import os
+        self.speaker_id = speaker_id
+        # Resolve model path: param > env var > default relative path
+        if model_path:
+            self.model_path = os.path.abspath(model_path)
+        elif os.environ.get("PIPER_MODEL_PATH"):
+            self.model_path = os.path.abspath(os.environ["PIPER_MODEL_PATH"])
+        else:
+            # Default: look for model in project directory
+            default_path = Path(__file__).parent.parent / "piper-model" / "piper-swedish-tts-multispeaker.onnx"
+            self.model_path = str(default_path.resolve())
+        self.config_path = self.model_path.replace(".onnx", ".onnx.json")
+
+    def load(self, device: str) -> None:
+        """Verify model files are available on disk."""
+        import os
+        if not os.path.exists(self.model_path):
+            raise FileNotFoundError(
+                f"Piper model not found at {self.model_path}. "
+                "Set PIPER_MODEL_PATH env var or provide model_path parameter. "
+                "Download from: https://huggingface.co/SubZeroAI/piper-swedish-tts-multispeaker"
+            )
+        if not os.path.exists(self.config_path):
+            raise FileNotFoundError(
+                f"Piper config not found at {self.config_path}."
+            )
+
+    def generate(
+        self, text: str, voice_wav_path: Path, language: str = "en",
+    ) -> tuple[np.ndarray, int]:
+        """Generate speech using piper CLI tool."""
+        OUTPUT_FILE = str(voice_wav_path)
+        command = [
+            "piper",
+            "--model", self.model_path,
+            "--speaker", str(self.speaker_id),
+            "--output_file", OUTPUT_FILE,
+        ]
+        result = subprocess.run(
+            command,
+            input=text,
+            text=True,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Piper TTS failed: {result.stderr}")
+        import soundfile as sf
+        wav, sr = sf.read(str(OUTPUT_FILE))
+        return wav, sr
 
 
 class ChatterboxEngine(TTSEngine):
@@ -109,6 +178,7 @@ class Qwen3TTSEngine(TTSEngine):
 ENGINES: dict[str, type[TTSEngine]] = {
     "chatterbox": ChatterboxEngine,
     "qwen3": Qwen3TTSEngine,
+    "piper": PiperTTSEngine,
 }
 
 
