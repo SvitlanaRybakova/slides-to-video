@@ -322,39 +322,52 @@ def _generate_ambient_pause(
     import soundfile as sf_read
 
     raw_path = output_path.parent / "ambient_raw.wav"
-    engine.generate_to_file(
-        "                    ", voice_wav_path, raw_path, language=language,
-    )
-
-    # Find the clean portion (before any speech artifacts appear)
-    data, sr = sf_read.read(str(raw_path), dtype="float32")
-    window_size = int(0.05 * sr)
-    trim_end = len(data)
-    for start in range(0, len(data) - window_size, window_size):
-        window = data[start:start + window_size]
-        rms = float(np.sqrt(np.mean(window ** 2)))
-        if rms > 0.01:
-            trim_end = start
-            break
-
-    trim_end = max(trim_end, int(0.1 * sr))
-    clean = data[:trim_end]
-
-    # Crossfade loop point so there's no click when tiling
-    fade_samples = int(0.02 * sr)
-    if len(clean) > fade_samples * 2:
-        fade_out = np.linspace(1, 0, fade_samples, dtype=np.float32)
-        fade_in = np.linspace(0, 1, fade_samples, dtype=np.float32)
-        clean[-fade_samples:] = (
-            clean[-fade_samples:] * fade_out + clean[:fade_samples] * fade_in
+    if engine.ambient_supported:
+        engine.generate_to_file(
+            "                    ", voice_wav_path, raw_path, language=language,
         )
 
-    # Tile to fill the requested duration
-    n_samples = int(duration * sr)
-    n_loops = int(np.ceil(n_samples / len(clean)))
-    looped = np.tile(clean, n_loops)[:n_samples]
+        # Find the clean portion (before any speech artifacts appear)
+        data, sr = sf_read.read(str(raw_path), dtype="float32")
+        window_size = int(0.05 * sr)
+        trim_end = len(data)
+        for start in range(0, len(data) - window_size, window_size):
+            window = data[start:start + window_size]
+            rms = float(np.sqrt(np.mean(window ** 2)))
+            if rms > 0.01:
+                trim_end = start
+                break
 
-    sf_read.write(str(output_path), looped, sr)
+        trim_end = max(trim_end, int(0.1 * sr))
+        clean = data[:trim_end]
+
+        # Crossfade loop point so there's no click when tiling
+        fade_samples = int(0.02 * sr)
+        if len(clean) > fade_samples * 2:
+            fade_out = np.linspace(1, 0, fade_samples, dtype=np.float32)
+            fade_in = np.linspace(0, 1, fade_samples, dtype=np.float32)
+            clean[-fade_samples:] = (
+                clean[-fade_samples:] * fade_out + clean[:fade_samples] * fade_in
+            )
+
+        # Tile to fill the requested duration
+        n_samples = int(duration * sr)
+        n_loops = int(np.ceil(n_samples / len(clean)))
+        looped = np.tile(clean, n_loops)[:n_samples]
+
+        sf_read.write(str(output_path), looped, sr)
+    else:
+        # Piper cannot generate ambient noise from whitespace input; use silence
+        sr = 24000  # default sample rate for Piper
+        # Guard against zero or negative duration which would create an empty file
+        if duration <= 0:
+            duration = 1.0
+        n_samples = int(duration * sr)
+        silence = np.zeros(n_samples, dtype=np.float32)
+        sf_read.write(str(output_path), silence, sr)
+        # Verify file was written correctly
+        if output_path.stat().st_size == 0:
+            raise RuntimeError(f"Failed to generate ambient file: {output_path} is empty")
 
 
 def assemble_video(
@@ -396,6 +409,9 @@ def assemble_video(
             _generate_ambient_pause(
                 engine, voice_wav_path, cached_ambient, pause, language=language,
             )
+        # Validate cached ambient file exists and is not empty
+        if not cached_ambient.exists() or cached_ambient.stat().st_size == 0:
+            raise RuntimeError(f"Ambient cache file is missing or empty: {cached_ambient}")
         ambient_path = tmpdir / "ambient.wav"
         import shutil
         shutil.copy2(cached_ambient, ambient_path)
@@ -528,8 +544,13 @@ def main():
         help="Path to narration script (markdown)",
     )
     parser.add_argument(
-        "--voice", type=Path, required=True, nargs="+",
-        help="Path to voice sample(s). Multiple files are merged for better cloning.",
+        "--voice", type=Path, required=False, nargs="*",
+        help="Path to voice sample(s). Multiple files are merged for better cloning. "
+             "Required for chatterbox/qwen3, optional for piper.",
+    )
+    parser.add_argument(
+        "--speaker", type=int, default=0, choices=[0, 1],
+        help="Speaker ID for piper multispeaker models (default: 0=Anna, 1=Johan)",
     )
     parser.add_argument(
         "--output", type=Path, default=Path("output.mp4"),
@@ -585,6 +606,10 @@ def main():
     )
     args = parser.parse_args()
 
+    # Validate voice argument: required for non-piper engines
+    if args.tts_engine != "piper" and not args.voice:
+        parser.error("--voice is required for chatterbox and qwen3 engines")
+
     audio_dir = args.cache_dir / "audio_clips"
     slides_dir = args.cache_dir / "slide_images"
 
@@ -609,13 +634,32 @@ def main():
         slides = [(n, t) for n, t in slides if n in requested]
         print(f"  Filtered to {len(slides)} slides: {sorted(n for n, _ in slides)}\n")
 
-    print("Preparing voice sample...")
+    # Prepare voice sample (only for non-piper engines)
     args.cache_dir.mkdir(exist_ok=True)
-    voice_wav = merge_voice_samples(
-        args.voice, args.cache_dir / "voice_merged.wav",
-    )
-    if len(args.voice) > 1:
-        print(f"  Merged {len(args.voice)} voice samples")
+    if args.tts_engine != "piper":
+        print("Preparing voice sample...")
+        voice_wav = merge_voice_samples(
+            args.voice, args.cache_dir / "voice_merged.wav",
+        )
+        if len(args.voice) > 1:
+            print(f"  Merged {len(args.voice)} voice samples")
+    else:
+        # For piper, create a dummy path (not used, but API expects it)
+        voice_wav = args.cache_dir / "voice_dummy.wav"
+        if not voice_wav.exists():
+            voice_wav.write_bytes(b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x08\x00data\x00\x00\x00\x00")
+        print("Using Piper TTS (no voice cloning - uses pre-trained speakers)")
+
+    print()
+
+    print(f"Loading TTS engine ({args.tts_engine})...")
+    # Pass speaker_id to Piper engine
+    if args.tts_engine == "piper":
+        from tts_engines import PiperTTSEngine
+        engine = PiperTTSEngine(speaker_id=args.speaker)
+    else:
+        engine = get_engine(args.tts_engine)
+    engine.load(args.device)
     print()
 
     print(f"Loading TTS engine ({args.tts_engine})...")

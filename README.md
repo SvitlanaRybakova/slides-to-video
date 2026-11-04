@@ -2,13 +2,23 @@
 
 Turn slide decks into narrated videos with AI voice cloning. Upload a PDF, write a script, provide a ~5 second voice sample, and get a professional presentation video.
 
-All processing runs locally on your GPU. Your voice data never leaves your machine.
+All processing runs locally on your machine. Your voice data never leaves your machine.
+
+## TTS Engines
+
+| Engine | Voice Cloning | Languages | GPU Required | Device |
+|---|---|---|---|---|
+| **Qwen3-TTS** | 3-second cloning | 10 languages (en, zh, ja, ko, fr, de, es, ar, ru, pt) | Recommended (CUDA) | CUDA or CPU |
+| **Chatterbox** | Zero-shot cloning | English only | No | CPU |
+| **Piper** | Pre-trained speakers | Model-dependent (e.g. Swedish) | No | CPU |
+
+Qwen3 is the most capable (multilingual, high quality) but benefits from a GPU. Chatterbox is lightweight and runs on CPU. Piper uses pre-trained ONNX models and runs purely on CPU — no voice cloning, just pick a speaker.
 
 ## Features
 
-- **Multiple TTS engines**: Qwen3-TTS (recommended), Chatterbox
-- **Voice cloning**: Clone your voice from a short audio sample (~5 seconds)
-- **Multilingual**: Generate narration in 10 languages (en, zh, ja, ko, fr, de, es, ar, ru, pt)
+- **Multiple TTS engines**: Qwen3-TTS, Chatterbox, Piper
+- **Voice cloning**: Clone your voice from a short audio sample (~5 seconds) — Qwen3 and Chatterbox
+- **Multilingual**: Generate narration in 10 languages with Qwen3-TTS
 - **Smart caching**: Only regenerates audio for slides where the script changed
 - **Web editor**: Professional video-editor-style UI for previewing and editing
 - **Click sounds**: Optional slide transition click effects
@@ -35,30 +45,103 @@ uv run src/server.py
 
 ## Quick Start (CLI)
 
+### Qwen3-TTS (multilingual, GPU recommended)
+
 ```bash
+uv sync --group qwen3
 uv run src/generate.py \
     --slides presentation.pdf \
     --script script.md \
     --voice voice_sample.wav \
     --tts-engine qwen3 \
+    --device cuda \
+    --language en \
     --click-sound assets/click.wav
+```
+
+### Chatterbox (English, CPU)
+
+```bash
+uv sync --group chatterbox
+uv run src/generate.py \
+    --slides presentation.pdf \
+    --script script.md \
+    --voice voice_sample.wav \
+    --tts-engine chatterbox
+```
+
+### Piper (pre-trained speakers, CPU)
+
+```bash
+uv sync
+uv run src/generate.py \
+    --slides presentation.pdf \
+    --script script.md \
+    --tts-engine piper \
+    --speaker 0
 ```
 
 ## Requirements
 
-- Python 3.10+
-- NVIDIA GPU with CUDA support
-- `ffmpeg` and `pdftoppm` (from `poppler-utils`) installed and in PATH
+### System Dependencies
 
-## Installation
+#### ffmpeg
+
+`ffmpeg` is required for audio and video processing. Make sure your installation includes the `x265` library — missing `x265` will cause silent crashes (`SIGABRT`) during video encoding.
+
+**macOS:**
+```bash
+brew install ffmpeg
+# Verify x265 is included:
+ffmpeg -encoders | grep libx265
+```
+
+**Ubuntu / Debian:**
+```bash
+sudo apt update
+sudo apt install ffmpeg
+# Verify x265 is included:
+ffmpeg -encoders | grep libx265
+```
+
+**Verification:**
+```bash
+ffmpeg -version
+```
+
+#### pdftoppm
 
 ```bash
-# Install with Qwen3-TTS (recommended)
+# macOS
+brew install poppler
+
+# Ubuntu / Debian
+sudo apt install poppler-utils
+```
+
+Verify with `pdftoppm -v`.
+
+### Python Dependencies
+
+- Python 3.10+
+- Install the TTS engine group you want:
+
+```bash
+# Qwen3-TTS (recommended — multilingual, best quality)
 uv sync --group qwen3
 
-# Or with Chatterbox
+# Chatterbox (English only, lightweight)
 uv sync --group chatterbox
+
+# Piper (pre-trained, no cloning needed)
+uv sync
 ```
+
+### Hardware
+
+- **Qwen3-TTS**: Runs on CPU, but a CUDA-capable NVIDIA GPU is strongly recommended for fast inference. Use `--device cuda` (default) or `--device cpu`.
+- **Chatterbox**: Runs on CPU.
+- **Piper**: Runs purely on CPU. No GPU needed.
 
 ## CLI Options
 
@@ -68,7 +151,8 @@ uv sync --group chatterbox
 | `--script`           | (required)   | Path to narration script (markdown)                                |
 | `--voice`            | (required)   | Path to voice sample(s). Multiple files merged for better cloning. |
 | `--output`           | `output.mp4` | Output video path                                                  |
-| `--tts-engine`       | `chatterbox` | TTS engine (`chatterbox`, `qwen3`)                                 |
+| `--tts-engine`       | `chatterbox` | TTS engine (`chatterbox`, `qwen3`, `piper`)                        |
+| `--speaker`          | `0`          | Speaker ID for piper multispeaker models (e.g. 0, 1)               |
 | `--language`         | `en`         | Language code (en, zh, ja, ko, fr, de, es, ar, ru, pt)             |
 | `--pause`            | `1.0`        | Seconds of pause between slides                                    |
 | `--speed`            | (none)       | Playback speed multiplier (e.g. 1.2 for 20% faster)                |
@@ -109,7 +193,7 @@ Audio clips and slide images are cached in `.cache/` by default. The system hash
 ```
 src/
   generate.py       # Core generation pipeline
-  tts_engines.py    # TTS engine abstraction (Qwen3, Chatterbox)
+  tts_engines.py    # TTS engine abstraction (Qwen3, Chatterbox, Piper)
   server.py         # FastAPI backend for the web editor
 web/
   editor.html       # Video editor frontend

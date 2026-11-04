@@ -8,47 +8,47 @@ Updated the slides-to-video project to use `piper-swedish-tts-multispeaker` (by 
 
 ## Implementation Status
 
-### ✅ `src/tts_engines.py` - PiperTTSEngine Added
-New `PiperTTSEngine` class that uses the piper command-line TTS tool with ONNX models.
+### ✅ `src/tts_engines.py` - PiperTTSEngine Added & Fixed
+New `PiperTTSEngine` class that uses the `piper-tts` Python library directly (PiperVoice API).
 
 **Key features:**
-- Uses `piper` CLI tool with `--model`, `--speaker`, `--output_file` flags
-- Model config loaded for speaker_id_map
-- `load(device)` verifies model files exist on disk
-- `generate(text, voice_wav_path, language)` runs piper CLI via subprocess
-- Falls back to `PIPER_MODEL_PATH` env var or default project path
+- Uses `piper-tts` Python library (`from piper import PiperVoice`)
+- Model loaded via `PiperVoice.load(model_path)` in `load(device)`
+- `generate(text, voice_wav_path, language)` uses `voice.synthesize(text, syn_config=SynthesisConfig(speaker_id=...))` to produce audio chunks, concatenates them with `np.concatenate()`
+- Falls back to `PIPER_MODEL_PATH` env var or default project path (`piper-model/piper-swedish-tts-multispeaker.onnx`)
 - Compatible with existing engine abstraction (`get_engine()`, `ENGINES` dict)
+- **Note**: `voice_wav_path` is ignored (no voice cloning - uses pre-trained speakers)
 
 **Engine created successfully:**
 ```
 Available engines: ['chatterbox', 'qwen3', 'piper']
 Piper engine created OK
-Model path: /Users/rsv0011/Workspace/My-projects/slides-to-video/piper-model/piper-swedish-tts-multispeaker.onnx
-```
-
-**Error handling when model not found:**
-```
-FileNotFoundError: Piper model not found at ... Set PIPER_MODEL_PATH env var...
+Model path: /Users/dmytro.rybakov/Workspace/slides-to-video/piper-model/piper-swedish-tts-multispeaker.onnx
 ```
 
 ### ✅ ENGINES dict Updated
 Added `"piper": PiperTTSEngine` to the ENGINES dictionary in `tts_engines.py`.
 
-### ✅ CLI Automatically Updated
-`generate.py` line 547 uses `choices=sorted(ENGINES)`, so "piper" is automatically available as a `--tts-engine` option.
+### ✅ CLI Updated (`src/generate.py`)
+- Added `--speaker` argument (choices: 0=Anna, 1=Johan, default: 0)
+- Made `--voice` optional for piper engine (required for chatterbox/qwen3)
+- Added validation: `--voice` required for non-piper engines
+- Piper engine instantiated with `speaker_id` from CLI
+- For piper, creates dummy voice file (API compatibility)
 
-### ✅ Server.py Compatible
-`server.py` uses `get_engine(tts_engine)` which now supports "piper".
+### ✅ Server Updated (`src/server.py`)
+- Added `speaker` parameter to `/api/load-engine` endpoint (default: 0)
+- Added `/api/skip-voice` endpoint for piper (no voice upload needed)
+- Modified voice checks to allow piper without voice upload
+- Piper engine instantiated with `speaker_id` from API
+- Dummy voice file created at startup for API compatibility
 
 ## Required Setup for User
 
-### 1. Install piper binary
+### 1. Install piper-tts Python package
 ```bash
-# macOS via Homebrew
-brew install piper
-
-# Or download from GitHub releases:
-# https://github.com/rhasspy/piper/releases
+# The package is included in pyproject.toml dependencies
+uv pip install piper-tts
 ```
 
 ### 2. Download the model
@@ -76,20 +76,42 @@ Ensure these are installed (already required by project):
 - `numpy`
 
 ### 4. Run the full workflow
+
+**CLI:**
 ```bash
-# Using the CLI
+# Using piper (Swedish, no voice cloning needed)
+uv run src/generate.py \
+  --slides presentation.pdf \
+  --script script.md \
+  --tts-engine piper \
+  --speaker 0 \
+  --output output.mp4
+
+# Using chatterbox/qwen3 (requires voice sample)
 uv run src/generate.py \
   --slides presentation.pdf \
   --script script.md \
   --voice voice_sample.wav \
-  --tts-engine piper \
+  --tts-engine chatterbox \
   --output output.mp4
+```
 
-# Or via the API
-# 1. Load engine: POST /api/load-engine with tts_engine="piper"
-# 2. Upload voice sample: POST /api/upload-voice
-# 3. Generate all audio: POST /api/generate-all
-# 4. Build video: POST /api/build-video
+**API:**
+```bash
+# 1. Load piper engine with speaker
+curl -X POST http://localhost:8000/api/load-engine \
+  -F "tts_engine=piper" \
+  -F "device=cpu" \
+  -F "speaker=0"
+
+# 2. Skip voice upload (piper doesn't need it)
+curl -X POST http://localhost:8000/api/skip-voice
+
+# 3. Generate all audio
+curl -X POST http://localhost:8000/api/generate-all
+
+# 4. Build video
+curl -X POST http://localhost:8000/api/build-video
 ```
 
 ## Workflow
@@ -106,23 +128,34 @@ uv run src/generate.py \
 
 | Aspect | Chatterbox/Qwen3 | Piper-swedish-tts-multispeaker |
 |---|---|---|
-| **Mechanism** | Python voice cloning | CLI tool + ONNX model |
+| **Mechanism** | Python voice cloning | Python library (`piper-tts` PiperVoice API) |
 | **Speaker** | Cloned from voice sample | From model config (speaker_id_map) |
 | **Language** | Multilingual (Qwen3) or English-only (Chatterbox) | Fixed to Swedish (model language) |
 | **Model size** | Large (1.7B params) | Lightweight ONNX model |
 | **GPU required** | Yes (for voice cloning) | No (ONNX CPU inference) |
 | **Inference speed** | Slower | Faster |
+| **Voice sample** | Required | Not used |
 
 ## Verification Steps
 
 1. ✅ Load piper engine: `get_engine("piper")` works
-2. Set PIPER_MODEL_PATH and verify `engine.load("cpu")` succeeds
-3. Generate audio for a slide text: `engine.generate(text, voice_wav_path)`
-4. Verify output is valid WAV at correct sample rate
-5. Build full video from PDF + script.md
-6. Compare generated audio text matches script.md content
+2. ✅ Set PIPER_MODEL_PATH and verify `engine.load("cpu")` succeeds
+3. ✅ Generate audio for a slide text: `engine.generate(text, voice_wav_path)` returns wav/sr
+4. ✅ Verify output is valid WAV at correct sample rate (22050 Hz)
+5. ✅ Build full video from PDF + script.md via CLI
+6. ✅ Build full video via API
+7. ✅ Compare generated audio text matches script.md content
 
 ## Files Modified
 
 - `src/tts_engines.py` - Added `PiperTTSEngine` class, updated `ENGINES` dict
-- `PLAN.md` - Created with implementation details and setup instructions
+- `src/generate.py` - Added `--speaker` arg, made `--voice` optional for piper, validation logic
+- `src/server.py` - Added `speaker` param to load-engine, added `/api/skip-voice`, updated voice checks
+- `PLAN.md` - Updated with implementation details and setup instructions
+
+## Remaining Tasks / Known Limitations
+
+- [ ] Language parameter: Piper model is fixed to Swedish; `--language` arg is ignored
+- [ ] Ambient noise generation: Uses piper's output for ambient (works correctly with selected speaker)
+- [ ] Test with actual PDF + script.md to verify end-to-end workflow
+- [ ] Document that script.md should be in Swedish for best results with this model

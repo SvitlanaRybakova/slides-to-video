@@ -18,6 +18,8 @@ import soundfile as sf
 class TTSEngine(abc.ABC):
     """Base class for TTS engines with voice cloning."""
 
+    ambient_supported: bool = True
+
     @abc.abstractmethod
     def load(self, device: str) -> None:
         """Load the model onto the given device."""
@@ -51,19 +53,19 @@ LANGUAGE_MAP_QWEN3 = {
 class PiperTTSEngine(TTSEngine):
     """Piper TTS: local speech synthesis with pre-trained ONNX models.
 
-    Uses the piper command-line tool with ONNX models.
+    Uses the piper-tts Python library directly (PiperVoice API).
     Supports multilingual models including piper-swedish-tts-multispeaker.
 
-    Requires: piper binary installed and model files available.
+    Requires: piper-tts>=1.2 installed and model files available.
     Model can be downloaded from: https://huggingface.co/SubZeroAI/piper-swedish-tts-multispeaker
 
     Example:
         >>> engine = PiperTTSEngine()
         >>> engine.load("cpu")
-        >>> wav, sr = engine.generate("Hej på dig", voice_wav_path)
+        >>> wav, sr = engine.generate("Hej på dig", Path("dummy.wav"))  # voice_wav_path ignored
     """
 
-    def __init__(self, model_path: str = None, speaker_id: int = 0):
+    def __init__(self, model_path: str | None = None, speaker_id: int = 0):
         import os
         self.speaker_id = speaker_id
         # Resolve model path: param > env var > default relative path
@@ -76,9 +78,12 @@ class PiperTTSEngine(TTSEngine):
             default_path = Path(__file__).parent.parent / "piper-model" / "piper-swedish-tts-multispeaker.onnx"
             self.model_path = str(default_path.resolve())
         self.config_path = self.model_path.replace(".onnx", ".onnx.json")
+        self.voice = None
+
+    ambient_supported = False
 
     def load(self, device: str) -> None:
-        """Verify model files are available on disk."""
+        """Load the PiperVoice model from the ONNX file."""
         import os
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(
@@ -90,6 +95,8 @@ class PiperTTSEngine(TTSEngine):
             raise FileNotFoundError(
                 f"Piper config not found at {self.config_path}."
             )
+        from piper import PiperVoice
+        self.voice = PiperVoice.load(self.model_path)
 
     def generate(
         self, text: str, voice_wav_path: Path, language: str = "en",
