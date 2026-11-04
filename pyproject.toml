@@ -8,6 +8,7 @@ dependencies = [
     "soundfile",
     "torch>=2.6,<2.8",
     "torchaudio>=2.6,<2.8",
+    "piper-tts>=1.2",
 ]
 
 [dependency-groups]

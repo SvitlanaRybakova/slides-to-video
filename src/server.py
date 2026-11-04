@@ -29,7 +29,7 @@ from generate import (
     _load_cache_hashes,
     _save_cache_hashes,
 )
-from tts_engines import get_engine, ENGINES
+from tts_engines import get_engine, ENGINES, PiperTTSEngine
 
 app = FastAPI()
 
@@ -40,7 +40,11 @@ SCRIPT_PATH = Path("script.md")
 
 engine = None
 engine_name = None
-voice_wav_path = None
+WORK_DIR.mkdir(exist_ok=True)
+voice_wav_path = WORK_DIR / "voice_dummy.wav"
+if not voice_wav_path.exists():
+    voice_wav_path.write_bytes(b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x08\x00data\x00\x00\x00\x00")
+piper_speaker_id = 0
 
 
 def _parse_current_script() -> list[tuple[int, str]]:
@@ -55,11 +59,16 @@ async def index():
 
 
 @app.post("/api/load-engine")
-async def api_load_engine(tts_engine: str = Form("qwen3"), device: str = Form("cuda")):
-    global engine, engine_name
+async def api_load_engine(tts_engine: str = Form("qwen3"), device: str = Form("cuda"), speaker: int = Form(0)):
+    global engine, engine_name, piper_speaker_id
     if engine_name == tts_engine and engine is not None:
         return {"status": "ok", "message": f"Engine '{tts_engine}' already loaded."}
-    engine = get_engine(tts_engine)
+    
+    if tts_engine == "piper":
+        piper_speaker_id = speaker
+        engine = PiperTTSEngine(speaker_id=speaker)
+    else:
+        engine = get_engine(tts_engine)
     engine.load(device)
     engine_name = tts_engine
     return {"status": "ok", "message": f"Loaded '{tts_engine}' on {device}."}
@@ -67,12 +76,21 @@ async def api_load_engine(tts_engine: str = Form("qwen3"), device: str = Form("c
 
 @app.post("/api/upload-voice")
 async def api_upload_voice(file: UploadFile = File(...)):
-    global voice_wav_path
+    global voice_wav_path, engine_name
     WORK_DIR.mkdir(exist_ok=True)
     upload_path = WORK_DIR / f"voice_upload{Path(file.filename).suffix}"
     upload_path.write_bytes(await file.read())
     voice_wav_path = convert_voice_sample(upload_path, WORK_DIR / "voice_converted.wav")
     return {"status": "ok", "message": f"Voice sample ready."}
+
+
+@app.post("/api/skip-voice")
+async def api_skip_voice():
+    """Skip voice upload for engines that don't require it (e.g., piper)."""
+    global engine_name
+    if engine_name != "piper":
+        return JSONResponse({"error": "Voice upload required for this engine"}, status_code=400)
+    return {"status": "ok", "message": "Voice skipped for piper engine."}
 
 
 @app.get("/api/slides")
@@ -147,8 +165,8 @@ async def api_update_script(slide_num: int, request: dict):
 async def api_generate(slide_num: int):
     if engine is None:
         return JSONResponse({"error": "Load TTS engine first"}, status_code=400)
-    if voice_wav_path is None:
-        return JSONResponse({"error": "Upload voice sample first"}, status_code=400)
+    if voice_wav_path is None and engine_name != "piper":
+        return JSONResponse({"error": "Upload voice sample first (or use /api/skip-voice for piper)"}, status_code=400)
 
     slides = _parse_current_script()
     target = None
@@ -178,8 +196,8 @@ async def api_generate(slide_num: int):
 async def api_generate_all():
     if engine is None:
         return JSONResponse({"error": "Load TTS engine first"}, status_code=400)
-    if voice_wav_path is None:
-        return JSONResponse({"error": "Upload voice sample first"}, status_code=400)
+    if voice_wav_path is None and engine_name != "piper":
+        return JSONResponse({"error": "Upload voice sample first (or use /api/skip-voice for piper)"}, status_code=400)
 
     slides = _parse_current_script()
     clips = generate_audio_clips(slides, engine, voice_wav_path, AUDIO_DIR, "en")
@@ -194,8 +212,8 @@ async def api_build_video(
 ):
     if engine is None:
         return JSONResponse({"error": "Load TTS engine first"}, status_code=400)
-    if voice_wav_path is None:
-        return JSONResponse({"error": "Upload voice sample first"}, status_code=400)
+    if voice_wav_path is None and engine_name != "piper":
+        return JSONResponse({"error": "Upload voice sample first (or use /api/skip-voice for piper)"}, status_code=400)
 
     slides = _parse_current_script()
     clips = generate_audio_clips(slides, engine, voice_wav_path, AUDIO_DIR, "en")
